@@ -1,0 +1,29 @@
+# Database settings
+database:
+  path: "data/collections.db"
+
+# Book processing settings
+books:
+  input_dir: "data/descriptions"
+  collections_dir: "data"
+  supported_formats: [".docx"]
+
+# S3 delivery settings — IIIF images and manifests are uploaded here after generation.
+# Credentials are resolved by boto3 (env vars → ~/.aws → IAM role).
+s3_delivery:
+  bucket: "${DELIVERY_S3_BUCKET}"
+  prefix: "iiif"
+  region: "${AWS_DEFAULT_REGION}"
+  # Base URL used in IIIF manifest @id and image resource fields.
+  # Set to a CloudFront distribution or S3 website endpoint.
+  iiif_base_url: "${IIIF_BASE_URL}"
+
+# Airflow settings
+airflow:
+  schedule_interval: "@hourly"
+  max_active_runs: 1
+  catchup: false
+  email_on_failure: true
+  email_on_retry: false
+  retries: 2
+  retry_delay: 300  # seconds

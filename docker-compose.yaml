@@ -1,0 +1,201 @@
+x-airflow-common: &airflow-common
+  build: .
+  restart: unless-stopped
+  env_file:
+    - .env
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB:-airflow}
+    AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB:-airflow}
+    AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY}
+    AIRFLOW__API__SECRET_KEY: ${AIRFLOW__API__SECRET_KEY:-${AIRFLOW__CORE__FERNET_KEY}}
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-${AIRFLOW__CORE__FERNET_KEY}}
+    AIRFLOW__API__BASE_URL: http://localhost:8080
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-webserver:8080/execution/
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    AIRFLOW__SECRETS__BACKEND: 'airflow.providers.amazon.aws.secrets.systems_manager.SystemsManagerParameterStoreBackend'
+    AIRFLOW__SECRETS__BACKEND_KWARGS: '{"connections_prefix": "/airflow/connections", "variables_prefix": "/airflow/variables"}'
+    AIRFLOW__SMTP__SMTP_HOST: ${AIRFLOW__SMTP__SMTP_HOST}
+    AIRFLOW__SMTP__SMTP_PORT: '465'
+    AIRFLOW__SMTP__SMTP_SSL: 'True'
+    AIRFLOW__SMTP__SMTP_STARTTLS: 'False'
+    AIRFLOW__SMTP__SMTP_TIMEOUT: '30'
+    AIRFLOW__SMTP__SMTP_RETRY_LIMIT: '5'
+    AIRFLOW__SMTP__SMTP_USER: ${AIRFLOW__SMTP__SMTP_USER}
+    AIRFLOW__SMTP__SMTP_PASSWORD: ${AIRFLOW__SMTP__SMTP_PASSWORD}
+    AIRFLOW__SMTP__SMTP_MAIL_FROM: ${AIRFLOW__SMTP__SMTP_USER}
+    AIRFLOW_CONN_SSH_DEFAULT: ${AIRFLOW_CONN_SSH_DEFAULT}
+    HUGGINGFACEHUB_API_TOKEN: ${HUGGINGFACEHUB_API_TOKEN}
+    PIPELINE_DB_HOST: ${PIPELINE_DB_HOST}
+    PIPELINE_DB_PORT: ${PIPELINE_DB_PORT}
+    PIPELINE_DB_NAME: ${PIPELINE_DB_NAME}
+    PIPELINE_DB_USER: ${PIPELINE_DB_USER}
+    PIPELINE_DB_PASSWORD: ${PIPELINE_DB_PASSWORD}
+    SSH_HOST: ${SSH_HOST}
+    SSH_PORT: ${SSH_PORT}
+    SSH_USER: ${SSH_USER}
+    SSH_PASSWORD: ${SSH_PASSWORD}
+    LLM_MODEL: ${LLM_MODEL:-Qwen/Qwen2.5-72B-Instruct}
+    LLM_LANGUAGE: ${LLM_LANGUAGE:-it}
+    # ── Storage backend ───────────────────────────────────────────────────────
+    # Set to 's3' to read/write data/ from S3 instead of the shared volume.
+    PIPELINE_STORAGE_BACKEND: ${PIPELINE_STORAGE_BACKEND:-local}
+    PIPELINE_S3_BUCKET: ${PIPELINE_S3_BUCKET:-}
+    PIPELINE_S3_PREFIX: ${PIPELINE_S3_PREFIX:-airflow/data}
+    # ── AWS credentials (also used by SSM secrets backend) ────────────────────
+    AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-eu-west-1}
+    AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+    AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+    # Leave blank to rely on IAM instance/task role instead of static keys.
+  volumes:
+    - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+    - ${AIRFLOW_PROJ_DIR:-.}/operators:/opt/airflow/operators
+    - ${AIRFLOW_PROJ_DIR:-.}/utils:/opt/airflow/utils
+    # Shared data volume — used when PIPELINE_STORAGE_BACKEND=local.
+    # For multi-host deployments set PIPELINE_STORAGE_BACKEND=s3 and
+    # supply PIPELINE_S3_BUCKET; the volume below can then be omitted.
+    - airflow-shared-data:/opt/airflow/data
+    - airflow-logs:/opt/airflow/logs
+    - ~/.ssh:/home/airflow/.ssh:ro
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on: &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  # ── Infrastructure ─────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-airflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-airflow}
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-airflow}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  # ── One-shot init (runs db migrate + creates admin user, then exits) ────────
+  airflow-init:
+    <<: *airflow-common
+    restart: "no"
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        airflow db migrate
+        airflow users create \
+          --username "${AIRFLOW_ADMIN_USER:-airflow}" \
+          --password "${AIRFLOW_ADMIN_PASSWORD}" \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email "${AIRFLOW_ADMIN_EMAIL:-admin@example.com}" || true
+        echo "Init complete."
+
+  # ── Airflow services ────────────────────────────────────────────────────────
+  airflow-webserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v2/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type DagProcessorJob --hostname \"$${HOSTNAME}\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$${HOSTNAME}\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+      airflow-dag-processor:
+        condition: service_healthy
+
+  airflow-worker:
+    <<: *airflow-common
+    command: celery worker
+    healthcheck:
+      test: ["CMD-SHELL", "celery --app airflow.providers.celery.executors.celery_executor.app inspect ping -d \"celery@$${HOSTNAME}\" --timeout 5"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ── Flower — Celery task monitoring UI (port 5555) ─────────────────────────
+  flower:
+    <<: *airflow-common
+    command: celery flower
+    ports:
+      - "127.0.0.1:5555:5555"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5555/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-db-volume:
+  airflow-logs:
+  airflow-shared-data:
+    # Named volume shared across all Celery workers on this host.
+    # Replace with an NFS/EFS mount or set PIPELINE_STORAGE_BACKEND=s3
+    # to scale across multiple Docker hosts without a shared filesystem.

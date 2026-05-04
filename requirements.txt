@@ -1,0 +1,26 @@
+# Runtime dependencies for the pipeline operators.
+# Airflow itself and its providers are installed in the Docker image (see Dockerfile).
+# This file is used by the Dockerfile COPY + pip install step.
+
+# Document parsing
+python-docx
+
+# Data processing
+pandas
+openpyxl
+
+# Database / SSH
+psycopg2-binary
+sshtunnel
+paramiko
+
+# LLM / AI
+huggingface_hub
+
+# Config / utilities
+python-dotenv
+pyyaml
+watchdog
+
+# AWS S3 (object storage backend for data/ directory)
+boto3
